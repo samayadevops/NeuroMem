@@ -1,0 +1,21 @@
+# Python byte-compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Testing / Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Ephemeral Kuzu and ChromaDB databases
+neuromem_data/
+neuromem_vectors/
+neuromem_graph/
+*.db
+*.log
