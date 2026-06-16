@@ -1,3 +1,6 @@
+![License](https://img.shields.io/badge/license-MIT-blue)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Version](https://img.shields.io/badge/version-v0.1.0-orange)
 # NeuroMem
 
 A unified hybrid memory engine for AI agents that combines graph-based reasoning and semantic vector search to build persistent, evolving cognitive memory.
