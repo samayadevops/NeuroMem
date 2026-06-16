@@ -5,6 +5,7 @@
 ![Version](https://img.shields.io/badge/version-v0.1.0-orange)
 
 </p>
+
 # NeuroMem
 
 A unified hybrid memory engine for AI agents that combines graph-based reasoning and semantic vector search to build persistent, evolving cognitive memory.
