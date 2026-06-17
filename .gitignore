@@ -1,21 +1,78 @@
-# Python byte-compiled files
+# ═══════════════════════════════════════════════════════════════
+# Python
+# ═══════════════════════════════════════════════════════════════
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+wheels/
+pip-wheel-metadata/
+MANIFEST
 
 # Virtual environments
 .venv/
 venv/
 ENV/
+env/
 
+# ═══════════════════════════════════════════════════════════════
 # Testing / Coverage
+# ═══════════════════════════════════════════════════════════════
 .coverage
+.coverage.*
 htmlcov/
 .pytest_cache/
+.tox/
+.nox/
+coverage.xml
+*.cover
 
-# Ephemeral Kuzu and ChromaDB databases
+# ═══════════════════════════════════════════════════════════════
+# Type checkers / Linters
+# ═══════════════════════════════════════════════════════════════
+.mypy_cache/
+.pytype/
+.pyre/
+.basedpyright/
+__pyrefly_virtual__/
+
+# ═══════════════════════════════════════════════════════════════
+# IDE / Editors
+# ═══════════════════════════════════════════════════════════════
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ═══════════════════════════════════════════════════════════════
+# OS generated
+# ═══════════════════════════════════════════════════════════════
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ═══════════════════════════════════════════════════════════════
+# NeuroMem — ephemeral data (Kuzu, ChromaDB, archives)
+# ═══════════════════════════════════════════════════════════════
 neuromem_data/
 neuromem_vectors/
 neuromem_graph/
 *.db
 *.log
+
+# ═══════════════════════════════════════════════════════════════
+# Debug / scratch files
+# ═══════════════════════════════════════════════════════════════
+_debug*.py
+_verify*.py
+_debug*_out.txt

@@ -1,7 +1,7 @@
 <p align="center">
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Version](https://img.shields.io/badge/version-v0.1.0-orange)
 
 </p>
@@ -21,6 +21,7 @@ NeuroMem integrates Kuzu and ChromaDB to enable agents to learn, recall, reason,
 * Reasoning trace capture for auditability and debugging
 * Trust-aware knowledge propagation between agent namespaces
 * Context compression with content-type routing, reversible storage, and per-strategy summarisation (logs, conversation, code, RAG)
+* **Full CLI** for integration with shells, Claude Code, Gemini CLI, and any subprocess-capable agent
 * Persistent storage powered by Kuzu and ChromaDB
 
 ## Core Concepts
@@ -51,6 +52,7 @@ Using pip:
 
 ```bash
 pip install -r requirements.txt
+pip install -e .
 ```
 
 Using Poetry:
@@ -59,7 +61,11 @@ Using Poetry:
 poetry install
 ```
 
+After installation, the `neuromem` command is available on your PATH.
+
 ## Quick Start
+
+### Python API
 
 ```python
 from neuromem import NeuroMemClient
@@ -84,6 +90,67 @@ with NeuroMemClient.create("./agent_memory") as client:
         "tool_run_failed: api_timeout",
         block_threshold=2
     )
+```
+
+### CLI
+
+The `neuromem` CLI outputs JSON by default so agents and scripts can parse results directly. Every command exits `0` on success and `1` on error.
+
+```bash
+# Learn a fact
+neuromem learn "The Eiffel Tower is in Paris" --confidence 0.95 --tags "geography,europe"
+
+# Recall related beliefs
+neuromem recall "French landmarks" --n 5 --pretty
+
+# Record a guardrail
+neuromem guard "never call tool X without arguments" --severity warning
+
+# Check if a pattern is blocked
+neuromem is-blocked "never call tool X without arguments"
+
+# List all beliefs
+neuromem list --pretty
+
+# Get a specific belief
+neuromem get <belief_id>
+
+# View unified stats
+neuromem stats --pretty
+
+# Apply temporal decay
+neuromem decay --ticks 3
+
+# Compress text (from argument, --file, or stdin)
+neuromem compress "ERROR 2026-06-17 Connection timeout..."
+cat server.log | neuromem compress
+
+# Retrieve the original uncompressed text
+neuromem retrieve <snapshot_id>
+
+# Share a belief to another namespace
+neuromem propagate <belief_id> agent_b --trust-factor 0.8
+
+# Deprecate a belief
+neuromem forget <belief_id>
+```
+
+**Global flags** (available on all commands):
+
+| Flag | Description |
+|---|---|
+| `--data-dir PATH` | Storage directory (default: `./neuromem_data`) |
+| `--namespace NS` | Agent namespace (default: `default`) |
+| `--pretty` | Pretty-print JSON output |
+| `--quiet` | Suppress loguru diagnostic output on stderr |
+| `--format {json,text}` | Output format (default: `json`) |
+
+**Agent integration example** (Claude Code, Gemini CLI, shell scripts):
+
+```bash
+# Pipe JSON output for programmatic use
+result=$(neuromem recall "French landmarks" --quiet)
+echo "$result" | python -c "import sys,json; [print(r['claim']) for r in json.load(sys.stdin)['results']]"
 ```
 
 ## Running Tests
@@ -132,4 +199,4 @@ for r in results:
 
 ## License
 
-Licensed under the MIT License. See the LICENSE file for details.
+Licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
