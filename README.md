@@ -229,7 +229,31 @@ Paste this system instruction into your terminal agent or include it in your pro
 
 ---
 
-### 2. Practical Examples
+### 2. MCP Server Integration (Model Context Protocol)
+
+Instead of relying on the CLI, you can connect NeuroMem directly to any MCP-compatible agent (like **Claude Desktop**, **Cursor**, or **Continue**) using the built-in MCP server. This gives the agent native, zero-configuration access to the `learn`, `recall`, `guard`, and `compress` tools.
+
+1. Ensure you have the `mcp` extra installed:
+   ```bash
+   pip install "neuromem-ai[mcp]"
+   ```
+2. Add the server to your agent's configuration file (for example, `~/.claude/claude_desktop_config.json` for Claude Desktop):
+
+   ```json
+   {
+     "mcpServers": {
+       "neuromem": {
+         "command": "neuromem",
+         "args": ["--data-dir", "./agent_memory", "serve"]
+       }
+     }
+   }
+   ```
+3. Restart your agent. It will now automatically store and retrieve memories through NeuroMem without needing any system prompts!
+
+---
+
+### 3. Practical Examples
 
 #### Scenario A: Persistent Developer Preferences
 
