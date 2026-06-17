@@ -166,6 +166,68 @@ result=$(neuromem recall "French landmarks" --quiet)
 echo "$result" | python -c "import sys,json; [print(r['claim']) for r in json.load(sys.stdin)['results']]"
 ```
 
+## Practical Usage & AI Agent Integration Guide
+
+NeuroMem is designed as a long-term persistent memory for AI agents (such as **Claude Code**, **Gemini CLI**, or custom chatbots). Since terminal-based agents have shell execution capabilities, you can teach them to use `neuromem` to remember context across conversations and prevent loop failures.
+
+### 1. Teaching Your Agent to Use NeuroMem (System Prompt)
+
+Paste this system instruction into your terminal agent or include it in your project's `.clauderc`, `.cursorrules`, or custom agent instructions:
+
+> You have access to a persistent hybrid memory CLI tool called `neuromem`. Use it to preserve context across sessions and avoid repeating command/tool failures:
+> 
+> * **Retrieve past context** at the start of a task:
+>   `neuromem --quiet --pretty recall "<keywords matching task>"`
+> * **Save important discoveries** (configurations, files, API keys, credentials, logic decisions):
+>   `neuromem --quiet --pretty learn "<fact to remember>"`
+> * **Prevent failure loops**: If a command or API fails, register a guardrail block:
+>   `neuromem --quiet guard "<failing command description>" --severity error`
+> * **Check block status** before executing commands:
+>   `neuromem --quiet is-blocked "<command to check>"`
+
+---
+
+### 2. Practical Examples
+
+#### Scenario A: Persistent Developer Preferences
+
+Register user choices so the agent remembers them forever:
+```bash
+# Save a choice
+neuromem --quiet learn "User prefers Python for backend development and HSL for styling" --confidence 1.0
+
+# Recall preference later
+neuromem --quiet --pretty recall "styling preferences"
+```
+
+#### Scenario B: Preventing Loop Failures (Negative Memory Guardrails)
+
+Prevent an agent from repeating a command that always fails:
+```bash
+# Register a block after an npm failure
+neuromem --quiet guard "npm run dev fails on port 3000 due to occupation" --severity error
+
+# Check before running
+result=$(neuromem --quiet is-blocked "npm run dev on port 3000")
+# Returns: {"pattern": "npm run dev on port 3000", "blocked": true}
+```
+
+#### Scenario C: Context Window Management (Log Compression)
+
+If you have massive logs but want to save context space, compress them first:
+```bash
+# Compress long output
+cat server.log | neuromem --quiet --pretty compress
+
+# Returns a short summary + ID:
+# { "id": "snapshot_123", "summary": "Database timeout after 10 retries" }
+
+# Retrieve exact details only when fixing the bug
+neuromem --quiet retrieve snapshot_123
+```
+
+---
+
 ## Running Tests
 
 Run the full suite:
