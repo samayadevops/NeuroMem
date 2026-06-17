@@ -48,6 +48,9 @@ Track how knowledge is shared across namespaces while preserving trust scores an
 
 ## Installation
 
+> [!NOTE]
+> Since this project uses native graph database dependencies (`kuzu`), it is recommended to use **Python 3.11 to 3.13**. On these versions, pre-built binary wheels are automatically fetched and installation will succeed instantly. On newer Python versions (such as Python 3.14+), pip may attempt to compile these dependencies from source, which requires CMake and C++ build tools.
+
 Using pip:
 
 ```bash
