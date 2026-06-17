@@ -99,10 +99,10 @@ class TestFuzzyMatching:
         assert _matches_negative_pattern("a b c x", neg_pass)
         assert not _matches_negative_pattern("a b c x", neg_fail)
 
-    def test_fuzzy_empty_strings(self):
-        neg = NegativeMemory(id="f6", pattern="", pattern_type="fuzzy")
-        # Both empty → True
-        assert _matches_negative_pattern("", neg)
+    def test_fuzzy_empty_strings_forbidden(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            NegativeMemory(id="f6", pattern="", pattern_type="fuzzy")
 
     def test_fuzzy_default_threshold(self):
         # Default fuzzy_threshold is 0.8

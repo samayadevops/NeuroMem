@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="logo.png" alt="NeuroMem Logo" width="250"/>
+</p>
+
+<p align="center">
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
