@@ -762,7 +762,7 @@ class KuzuGraphEngine(BaseGraphEngine):
         for attempt in range(self._max_retries):
             try:
                 start = time.perf_counter()
-                result = self._conn.execute(cypher, params)
+                result = self._conn_unsafe.execute(cypher, params)
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
 
                 columns = result.get_column_names()
@@ -841,7 +841,7 @@ class KuzuGraphEngine(BaseGraphEngine):
 
         try:
             # Detach-delete all nodes (also removes edges)
-            self._conn.execute("MATCH (n) DETACH DELETE n")
+            self._conn_unsafe.execute("MATCH (n) DETACH DELETE n")
         except Exception as exc:
             raise GraphEngineError(
                 f"Failed to clear graph: {exc}",
@@ -866,6 +866,16 @@ class KuzuGraphEngine(BaseGraphEngine):
                 backend="kuzu",
             )
 
+    @property
+    def _conn_unsafe(self) -> Any:
+        """Return the active Kuzu connection, asserting it is not None.
+
+        Only call this after ``_require_ready()`` has been called; the assert
+        should never fire at runtime but narrows the type for static checkers.
+        """
+        assert self._conn is not None, "_conn is None — was initialize() called?"
+        return self._conn
+
     def _require_not_readonly(self) -> None:
         """Raise if a mutating operation is attempted on a read-only engine."""
         if self._read_only:
@@ -877,7 +887,7 @@ class KuzuGraphEngine(BaseGraphEngine):
     def _execute_ddl(self, ddl: str) -> None:
         """Execute a DDL statement (CREATE TABLE, DROP TABLE, etc.)."""
         try:
-            self._conn.execute(ddl)
+            self._conn_unsafe.execute(ddl)
         except Exception as exc:
             raise GraphEngineError(
                 f"DDL execution failed: {exc}",
@@ -894,7 +904,7 @@ class KuzuGraphEngine(BaseGraphEngine):
     ) -> None:
         """Execute a mutating Cypher statement with error handling."""
         try:
-            self._conn.execute(cypher, parameters or {})
+            self._conn_unsafe.execute(cypher, parameters or {})
         except Exception as exc:
             raise GraphEngineError(
                 f"Write query failed: {exc}",
@@ -905,7 +915,7 @@ class KuzuGraphEngine(BaseGraphEngine):
     def _scan_existing_tables(self) -> None:
         """Scan the Kuzu catalog to populate label/edge-type registries."""
         try:
-            result = self._conn.execute("CALL show_tables() RETURN *")
+            result = self._conn_unsafe.execute("CALL show_tables() RETURN *")
             while result.has_next():
                 row = result.get_next()
                 # row format from show_tables: [id, name, type, db_name, comment]
@@ -933,7 +943,7 @@ class KuzuGraphEngine(BaseGraphEngine):
     ) -> bool:
         """Check the Kuzu catalog for a table by name and type."""
         try:
-            result = self._conn.execute(
+            result = self._conn_unsafe.execute(
                 "CALL show_tables() WHERE name = $name AND type = $type RETURN count(*) AS cnt",
                 {"name": name, "type": expected_type},
             )
@@ -953,14 +963,14 @@ class KuzuGraphEngine(BaseGraphEngine):
             # Drop all edge types that reference this label
             # (We need to check which rel tables reference it)
             try:
-                result = self._conn.execute(
+                result = self._conn_unsafe.execute(
                     "CALL show_tables() WHERE type = 'REL' RETURN name"
                 )
                 while result.has_next():
                     row = result.get_next()
                     rel_name = row[0]
                     try:
-                        self._conn.execute(f"DROP TABLE {rel_name}")
+                        self._conn_unsafe.execute(f"DROP TABLE {rel_name}")
                         self._registered_edge_types.discard(rel_name)
                         logger.debug("Dropped rel table {} (cascade from {})", rel_name, label)
                     except Exception:
@@ -970,7 +980,7 @@ class KuzuGraphEngine(BaseGraphEngine):
                 logger.debug("Cascade rel scan failed: {}", exc)
 
         try:
-            self._conn.execute(f"DROP TABLE {label}")
+            self._conn_unsafe.execute(f"DROP TABLE {label}")
             self._registered_labels.discard(label)
             self._primary_keys.pop(label, None)
             self._label_schemas.pop(label, None)
@@ -987,7 +997,7 @@ class KuzuGraphEngine(BaseGraphEngine):
         self._require_not_readonly()
 
         try:
-            self._conn.execute(f"DROP TABLE {edge_type}")
+            self._conn_unsafe.execute(f"DROP TABLE {edge_type}")
             self._registered_edge_types.discard(edge_type)
             logger.debug("Dropped rel table {}", edge_type)
         except Exception as exc:

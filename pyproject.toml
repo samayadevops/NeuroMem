@@ -37,6 +37,9 @@ basedpyright = "^1.18"
 mkdocs-material = "^9.5"
 mkdocstrings = { extras = ["python"], version = "^0.25" }
 
+[tool.poetry.scripts]
+neuromem = "neuromem.cli:_entrypoint"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
