@@ -11,6 +11,8 @@ interact with.  It wraps the lower-level :class:`NeuroMemEngine` with:
 - Context-manager support for automatic resource cleanup.
 - Convenience methods that mirror the cognitive model names
   (``learn``, ``recall``, ``forget``, ``propagate``, ``guard``).
+- **Compression integration** — context compression, reversible storage,
+  anomaly-aware learning, cross-namespace memory sharing, and unified stats.
 
 Example
 -------
@@ -33,16 +35,39 @@ Example
 
         # Share knowledge with another agent
         client.propagate(belief.id, "agent_b")
+
+        # Compress a long conversation into a compact memory snapshot
+        snapshot = client.compress_history(messages)
+        print(snapshot.summary)
+
+        # Store the snapshot as a belief with anomaly detection
+        client.learn_compressed(snapshot.summary)
+
+        # Retrieve the original uncompressed text later
+        original = client.retrieve_original(snapshot.raw_reference)
+
+        # Share memory across agent boundaries
+        client.share_memory(snapshot.id, "agent_c")
 """
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Literal, Union
 
 from loguru import logger
 
+from neuromem.compression.compressor import CompressionEngine, estimate_tokens
+from neuromem.compression.models import MemorySnapshot
+from neuromem.compression.reversible_store import (
+    MemoryNotFoundError,
+    ReversibleStore,
+    ReversibleStoreError,
+)
+from neuromem.compression.summarizer import BaseLLMProvider, ContextCompressor
 from neuromem.core.engine import (
     DEFAULT_FUSION_VECTOR_WEIGHT,
     EngineConfig,
@@ -60,7 +85,9 @@ from neuromem.core.models import (
     NegativeMemory,
     NegativeMemorySeverity,
     PropagationRecord,
+    ReasoningStep,
     ReasoningTrace,
+    TraceStepType,
 )
 from neuromem.storage.chroma_vector import ChromaVectorEngine
 from neuromem.storage.kuzu_graph import KuzuGraphEngine
@@ -195,6 +222,40 @@ class RecallResult:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# SharedMemoryRecord — result of cross-agent memory sharing
+# ═══════════════════════════════════════════════════════════════════════
+
+@dataclass
+class SharedMemoryRecord:
+    """Record returned by :meth:`NeuroMemClient.share_memory`.
+
+    Attributes
+    ----------
+    memory_id:
+        The snapshot ID that was shared.
+    target_namespace:
+        The receiving namespace.
+    trust_score:
+        Computed trust score (confidence × decay factor) in ``[0, 1]``.
+    created_at:
+        UTC timestamp when the share was recorded.
+    """
+    memory_id: str
+    target_namespace: str
+    trust_score: float
+    created_at: datetime = field(default_factory=lambda: datetime.now())
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a plain dict (JSON-safe)."""
+        return {
+            "memory_id": self.memory_id,
+            "target_namespace": self.target_namespace,
+            "trust_score": self.trust_score,
+            "created_at": self.created_at.isoformat(),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # NeuroMemClient
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -203,7 +264,10 @@ class NeuroMemClient:
 
     This client wraps :class:`NeuroMemEngine` with ergonomic defaults,
     optional embedding-function injection, and context-manager lifecycle
-    management.
+    management.  It also integrates the compression layer (via
+    :class:`CompressionEngine` and :class:`ReversibleStore`) so that
+    callers can compress, learn, retrieve, share, and inspect memories
+    through a single interface.
 
     Parameters
     ----------
@@ -233,6 +297,13 @@ class NeuroMemClient:
         self._embed_fn: EmbedFn | None = embed_fn
         self._closed: bool = False
 
+        # Compression subsystem (lazy-initialised on first use).
+        self._compression_engine: CompressionEngine | None = None
+        self._reversible_store: ReversibleStore | None = None
+
+        # Track shared memory references for decay/cross-namespace awareness.
+        self._shared_memory_registry: dict[str, dict[str, Any]] = {}
+
     # ══════════════════════════════════════════════════════════════════
     # Factory methods
     # ══════════════════════════════════════════════════════════════════
@@ -256,13 +327,15 @@ class NeuroMemClient:
         3. Creates a :class:`ChromaVectorEngine` in ``<storage_dir>/vectors``.
         4. Initialises both engines.
         5. Wires them into a :class:`NeuroMemEngine`.
-        6. Returns a :class:`NeuroMemClient` wrapping the engine.
+        6. Creates a :class:`ReversibleStore` in ``<storage_dir>/raw_archive``.
+        7. Returns a :class:`NeuroMemClient` wrapping the engine.
 
         Parameters
         ----------
         storage_dir:
             Root directory for all NeuroMem data.  Subdirectories
-            ``graph/`` and ``vectors/`` are created within it.
+            ``graph/``, ``vectors/``, and ``raw_archive/`` are created
+            within it.
         namespace:
             Default namespace for this client.
         embed_fn:
@@ -281,9 +354,13 @@ class NeuroMemClient:
         storage_path = Path(storage_dir).resolve()
         graph_path = storage_path / "graph"
         vector_path = storage_path / "vectors"
+        archive_path = storage_path / "raw_archive"
 
-        graph_path.mkdir(parents=True, exist_ok=True)
-        vector_path.mkdir(parents=True, exist_ok=True)
+        # Ensure the storage root exists, but do NOT pre-create the graph /
+        # vectors sub-directories — Kuzu rejects a pre-existing empty
+        # directory and ChromaDB prefers to manage its own folder.  Each
+        # engine's ``initialize()`` creates its subdir as needed.
+        storage_path.mkdir(parents=True, exist_ok=True)
 
         logger.info(
             "Creating NeuroMemClient",
@@ -306,7 +383,18 @@ class NeuroMemClient:
                 auto_bootstrap=auto_bootstrap,
             )
 
-            return cls(engine, embed_fn=embed_fn)
+            client = cls(engine, embed_fn=embed_fn)
+
+            # Pre-initialise the reversible store so that compress()
+            # works out of the box.
+            store = ReversibleStore(str(archive_path))
+            store.initialize()
+            client._reversible_store = store
+            client._compression_engine = CompressionEngine(
+                reversible_store=store,
+            )
+
+            return client
 
         except NeuroMemError:
             raise
@@ -327,8 +415,76 @@ class NeuroMemClient:
 
         Use this when you need fine-grained control over the engine
         configuration or custom storage backends.
+
+        Note
+        ----
+        Compression features (``compress``, ``learn_compressed``, etc.)
+        require a :class:`ReversibleStore` to be attached.  Either pass
+        one via :meth:`attach_compression` after construction, or use
+        :meth:`create` which wires everything automatically.
         """
         return cls(engine, embed_fn=embed_fn)
+
+    # ══════════════════════════════════════════════════════════════════
+    # Compression lifecycle
+    # ══════════════════════════════════════════════════════════════════
+
+    def attach_compression(
+        self,
+        reversible_store: ReversibleStore,
+        *,
+        llm: BaseLLMProvider | None = None,
+    ) -> None:
+        """Attach (or replace) the compression subsystem.
+
+        Call this when constructing the client via :meth:`from_engine`
+        or when you want to swap in a different LLM provider.
+
+        Parameters
+        ----------
+        reversible_store:
+            An already-initialised :class:`ReversibleStore`.
+        llm:
+            Optional LLM provider for semantic extraction.
+        """
+        self._require_open()
+        if not reversible_store.is_ready:
+            raise ConfigurationError(
+                "reversible_store",
+                "Store must be initialised before attaching; "
+                "call initialize() or enter it as a context manager.",
+            )
+        self._reversible_store = reversible_store
+        self._compression_engine = CompressionEngine(
+            reversible_store=reversible_store,
+            llm=llm,
+        )
+        logger.debug("Compression subsystem attached")
+
+    def _ensure_compression(self) -> CompressionEngine:
+        """Lazily initialise or return the compression engine.
+
+        Falls back to an in-memory reversible store when none has been
+        attached, so that ``compress()`` never crashes even in minimal
+        setups.
+        """
+        if self._compression_engine is not None:
+            return self._compression_engine
+
+        # Best-effort: create a temporary in-memory store under a temp
+        # directory.  This is a safety net, not a recommended path.
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="neuromem_compress_")
+        store = ReversibleStore(tmp)
+        store.initialize()
+        self._reversible_store = store
+        self._compression_engine = CompressionEngine(reversible_store=store)
+        logger.warning(
+            "Compression engine auto-created with ephemeral store at {}; "
+            "call attach_compression() for persistent storage",
+            tmp,
+        )
+        return self._compression_engine
 
     # ══════════════════════════════════════════════════════════════════
     # Core cognitive operations
@@ -637,6 +793,516 @@ class NeuroMemClient:
         )
 
     # ══════════════════════════════════════════════════════════════════
+    # Compression API
+    # ══════════════════════════════════════════════════════════════════
+
+    def compress(
+        self,
+        text: str,
+        *,
+        importance: float | None = None,
+    ) -> MemorySnapshot:
+        """Compress arbitrary text into a :class:`MemorySnapshot`.
+
+        The compression engine auto-detects the content type (logs,
+        conversation, code, RAG, markdown, plain text), picks the
+        optimal strategy, and stores the original for later retrieval.
+
+        Parameters
+        ----------
+        text:
+            Raw text to compress.  Must be a non-empty string.
+        importance:
+            Optional importance override in ``[0.0, 1.0]``.  When
+            omitted, importance is derived from content analysis
+            (e.g. log severity, entity density).
+
+        Returns
+        -------
+        MemorySnapshot
+            The compressed snapshot with a ``raw_reference`` for
+            later decompression via :meth:`retrieve_original`.
+        """
+        self._require_open()
+        comp = self._ensure_compression()
+        return comp.compress(text, importance=importance)
+
+    def learn_compressed(
+        self,
+        text: str,
+        *,
+        confidence: float = 0.5,
+        importance: float | None = None,
+        source: str = "compressed",
+        namespace: str | None = None,
+        tags: list[str] | None = None,
+    ) -> tuple[BeliefNode, MemorySnapshot, list[ContradictionEvent | NegativeMemory]]:
+        """Compress text and store the snapshot into ChromaDB + Kuzu,
+        then run anomaly detection.
+
+        This is the full cognitive-compression pipeline:
+
+        1. **Compress** the text via :meth:`compress` to produce a
+           :class:`MemorySnapshot`.
+        2. **Learn** the summary as a new :class:`BeliefNode` (stored
+           in both Kuzu graph and ChromaDB vector store).  If an embed
+           function is available the summary is embedded for vector
+           search.
+        3. **Anomaly detection** — the engine's internal contradiction
+           check runs during ``learn``.  This method additionally
+           post-checks the learned belief against all other active
+           beliefs in the namespace, recording :class:`ContradictionEvent`
+           and/or :class:`NegativeMemory` entries when anomalies are
+           found.
+        4. All steps are recorded in a :class:`ReasoningTrace` for
+           full auditability.
+
+        Parameters
+        ----------
+        text:
+            Raw text to compress and learn.
+        confidence:
+            Initial confidence for the learned belief.
+        importance:
+            Importance override for the snapshot.  ``None`` → auto.
+        source:
+            Origin label for the belief node.  Defaults to
+            ``"compressed"``.
+        namespace:
+            Target namespace.
+        tags:
+            Free-form labels for the belief.
+
+        Returns
+        -------
+        tuple[BeliefNode, MemorySnapshot, list[ContradictionEvent | NegativeMemory]]
+            A 3-tuple of:
+
+            - The persisted :class:`BeliefNode`.
+            - The :class:`MemorySnapshot`.
+            - A list of anomaly artefacts (contradiction events and/or
+              negative memories detected during learning).
+        """
+        self._require_open()
+
+        # ── Step 1: Compress ──────────────────────────────────────────
+        snapshot = self.compress(text, importance=importance)
+        ns = namespace or self._engine.namespace
+
+        # ── Step 2: Learn the summary as a belief ────────────────────
+        embedding = self._safe_embed(snapshot.summary) if self._embed_fn is not None else None
+
+        trace = ReasoningTrace(
+            namespace=ns,
+            trigger="learn_compressed",
+            trigger_metadata={
+                "snapshot_id": snapshot.id,
+                "importance": snapshot.importance,
+                "compression_ratio": snapshot.compression_ratio,
+            },
+        )
+        trace.add_step(ReasoningStep(
+            step_type=TraceStepType.CUSTOM,
+            description=f"Compressed raw text → snapshot {snapshot.id}",
+            metadata={
+                "snapshot_id": snapshot.id,
+                "importance": snapshot.importance,
+                "compression_ratio": snapshot.compression_ratio,
+                "keywords": snapshot.keywords[:10],
+            },
+        ))
+
+        belief = BeliefNode(
+            claim=snapshot.summary,
+            confidence=confidence,
+            gamma=self._engine.config.default_gamma,
+            embedding=embedding,
+            source=source,
+            namespace=ns,
+            tags=list(tags or []) + ["compressed", f"snap:{snapshot.id}"],
+            last_decay_tick=self._engine.current_tick,
+        )
+
+        # Run through the engine's anomaly-aware learn path.
+        # check_contradiction will fire during the internal learn, but
+        # we explicitly scan existing beliefs afterwards to capture
+        # events the engine may have produced internally.
+        self._engine.learn(
+            claim=snapshot.summary,
+            confidence=confidence,
+            embedding=embedding,
+            source=source,
+            namespace=ns,
+            tags=list(tags or []) + ["compressed", f"snap:{snapshot.id}"],
+            trace=trace,
+        )
+
+        # ── Step 3: Post-learn anomaly sweep ─────────────────────────
+        anomalies: list[ContradictionEvent | NegativeMemory] = []
+
+        # Scan existing beliefs for contradictions with the new one.
+        existing_beliefs = self._engine._scan_beliefs(ns)
+        for existing in existing_beliefs:
+            if existing.id == belief.id:
+                continue
+            event = self._engine.check_contradiction(
+                existing, snapshot.summary, embedding, namespace=ns,
+            )
+            if event is not None:
+                anomalies.append(event)
+                trace.add_step(ReasoningStep(
+                    step_type=TraceStepType.CONTRADICTION_DETECT,
+                    description=(
+                        f"Anomaly: snapshot contradicts belief {existing.id} "
+                        f"(sim={event.similarity_score:.3f})"
+                    ),
+                    belief_ids=[existing.id, belief.id],
+                    contradiction_ids=[event.id],
+                ))
+
+                # If the contradiction is severe enough, record a
+                # negative memory so future compressions of similar
+                # content surface the conflict.
+                if event.conflict_severity > 0.5:
+                    neg = self._engine.record_negative(
+                        pattern=f"contradicts:{existing.id[:24]}",
+                        context={
+                            "snapshot_id": snapshot.id,
+                            "conflict_severity": event.conflict_severity,
+                        },
+                        severity=NegativeMemorySeverity.WARNING,
+                        related_belief_id=existing.id,
+                        namespace=ns,
+                        trace=trace,
+                    )
+                    anomalies.append(neg)
+                    trace.add_step(ReasoningStep(
+                        step_type=TraceStepType.NEGATIVE_RECORD,
+                        description=f"Negative memory {neg.id} created for high-severity conflict",
+                        negative_ids=[neg.id],
+                        belief_ids=[existing.id],
+                    ))
+
+        self._engine._store_trace(trace)
+
+        logger.info(
+            "learn_compressed: belief={} snapshot={} anomalies={}",
+            belief.id, snapshot.id, len(anomalies),
+        )
+        return belief, snapshot, anomalies
+
+    def compress_history(
+        self,
+        messages: list[dict[str, str]] | str,
+        *,
+        importance: float | None = None,
+    ) -> MemorySnapshot:
+        """Compress a conversation history into a :class:`MemorySnapshot`.
+
+        Accepts either a list of message dicts (``{"role": "...", "content": "..."}``)
+        or a raw conversation string with role markers (``User:``, ``Assistant:``, etc.).
+
+        Parameters
+        ----------
+        messages:
+            Conversation messages.  Either a list of dicts with ``role``
+            and ``content`` keys, or a pre-formatted string transcript.
+        importance:
+            Optional importance override.
+
+        Returns
+        -------
+        MemorySnapshot
+            The compressed snapshot.
+        """
+        self._require_open()
+
+        # Normalise list-of-dicts into a single string for the router.
+        if isinstance(messages, list):
+            parts: list[str] = []
+            for msg in messages:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                parts.append(f"{role}: {content}")
+            text = "\n".join(parts)
+        else:
+            text = messages
+
+        comp = self._ensure_compression()
+        return comp.compress(text, importance=importance)
+
+    def compress_logs(
+        self,
+        logs: str | list[str],
+        *,
+        importance: float | None = None,
+    ) -> MemorySnapshot:
+        """Compress log entries into a :class:`MemorySnapshot`.
+
+        Accepts either a pre-joined log string or a list of individual
+        log lines.  The logs compression strategy extracts errors,
+        severity, and key milestones.
+
+        Parameters
+        ----------
+        logs:
+            Raw log text or a list of log-line strings.
+        importance:
+            Optional importance override.
+
+        Returns
+        -------
+        MemorySnapshot
+            The compressed snapshot.
+        """
+        self._require_open()
+
+        if isinstance(logs, list):
+            text = "\n".join(logs)
+        else:
+            text = logs
+
+        comp = self._ensure_compression()
+        return comp.compress(text, importance=importance)
+
+    def compress_rag(
+        self,
+        chunks: list[str],
+        *,
+        importance: float | None = None,
+    ) -> MemorySnapshot:
+        """Compress RAG retrieval chunks into a :class:`MemorySnapshot`.
+
+        Deduplicates overlapping chunks and merges them into a single
+        coherent passage.  Source citations (``[source: …]`` /
+        ``[doc: …]``) are preserved.
+
+        Parameters
+        ----------
+        chunks:
+            List of retrieved text passages, possibly overlapping.
+        importance:
+            Optional importance override.
+
+        Returns
+        -------
+        MemorySnapshot
+            The compressed snapshot.
+        """
+        self._require_open()
+
+        # Join chunks with separators so the router can still classify
+        # the combined text, but the compress_rag strategy inside the
+        # engine will split and deduplicate.
+        text = "\n\n".join(chunks) if chunks else ""
+
+        comp = self._ensure_compression()
+        return comp.compress(text, importance=importance)
+
+    def retrieve_original(self, memory_id: str) -> str:
+        """Retrieve the original, uncompressed text for a memory snapshot.
+
+        Parameters
+        ----------
+        memory_id:
+            The ``raw_reference`` (snapshot ID) to look up.
+
+        Returns
+        -------
+        str
+            The exact original text that was compressed.
+
+        Raises
+        ------
+        MemoryNotFoundError
+            If no original is stored under *memory_id*.
+        NeuroMemError
+            If the reversible store is not available.
+        """
+        self._require_open()
+        store = self._ensure_compression().reversible_store
+
+        try:
+            return store.retrieve_original(memory_id)
+        except MemoryNotFoundError:
+            raise
+        except ReversibleStoreError as exc:
+            raise NeuroMemError(
+                f"Failed to retrieve original for memory_id={memory_id!r}: {exc}",
+                context={"memory_id": memory_id},
+            ) from exc
+
+    # ══════════════════════════════════════════════════════════════════
+    # Cross-agent memory sharing
+    # ══════════════════════════════════════════════════════════════════
+
+    def share_memory(
+        self,
+        memory_id: str,
+        target_namespace: str,
+        *,
+        trust_factor: float | None = None,
+    ) -> SharedMemoryRecord:
+        """Share a compressed memory snapshot across agent boundaries.
+
+        Copies metadata references (summary, keywords, importance) into
+        the target namespace as a new BeliefNode, appends a trust score
+        and decay tracker.  The original uncompressed content remains
+        accessible via the same ``memory_id`` — no data duplication.
+
+        Parameters
+        ----------
+        memory_id:
+            The snapshot ID (or any ``raw_reference``) to share.
+        target_namespace:
+            Receiving namespace for the shared memory.
+        trust_factor:
+            Confidence multiplier in ``[0, 1]``.  Defaults to the
+            engine's ``default_trust_factor``.
+
+        Returns
+        -------
+        SharedMemoryRecord
+            Record of the sharing operation with trust score and timestamp.
+
+        Raises
+        ------
+        NeuroMemError
+            If the original cannot be retrieved or the engine rejects
+            the propagation.
+        """
+        self._require_open()
+
+        # Resolve the original content to produce a shareable belief.
+        try:
+            original = self.retrieve_original(memory_id)
+        except MemoryNotFoundError:
+            # Fall back: the memory_id might refer to a BeliefNode, not
+            # a compression snapshot.  Attempt to load it from the graph.
+            source_ns = self._engine.namespace
+            belief = self._engine._load_belief(memory_id, source_ns)
+            if belief is None:
+                raise NeuroMemError(
+                    f"Cannot share memory_id={memory_id!r}: not found in "
+                    "reversible store or belief graph",
+                    context={"memory_id": memory_id},
+                )
+            # Propagate the existing belief directly.
+            record = self.propagate(
+                memory_id, target_namespace,
+                trust_factor=trust_factor,
+            )
+            return SharedMemoryRecord(
+                memory_id=memory_id,
+                target_namespace=target_namespace,
+                trust_score=record.propagated_confidence,
+            )
+
+        # Compress the original to get a summary, then learn it in the
+        # target namespace with reduced confidence.
+        comp = self._ensure_compression()
+        snapshot = comp.compress(original, memory_id=memory_id)
+
+        effective_trust = (
+            trust_factor
+            if trust_factor is not None
+            else self._engine.config.default_trust_factor
+        )
+        shared_confidence = snapshot.importance * effective_trust
+
+        # Learn in the target namespace.
+        embedding = self._safe_embed(snapshot.summary) if self._embed_fn is not None else None
+        belief = self._engine.learn(
+            claim=snapshot.summary,
+            confidence=shared_confidence,
+            embedding=embedding,
+            source=f"shared:{self._engine.namespace}",
+            namespace=target_namespace,
+            tags=["shared", f"from:{self._engine.namespace}", f"snap:{memory_id}"],
+        )
+
+        # Register the share for decay tracking.
+        self._shared_memory_registry[memory_id] = {
+            "target_namespace": target_namespace,
+            "trust_score": shared_confidence,
+            "belief_id": belief.id,
+            "shared_at": datetime.now(),
+            "decay_tick": self._engine.current_tick,
+        }
+
+        logger.info(
+            "Shared memory {} → {} (trust={:.3f}, belief={})",
+            memory_id, target_namespace, shared_confidence, belief.id,
+        )
+
+        return SharedMemoryRecord(
+            memory_id=memory_id,
+            target_namespace=target_namespace,
+            trust_score=shared_confidence,
+        )
+
+    # ══════════════════════════════════════════════════════════════════
+    # Unified statistics
+    # ══════════════════════════════════════════════════════════════════
+
+    def stats(self) -> dict[str, Any]:
+        """Return unified statistics across all subsystems.
+
+        The returned dict contains:
+
+        - ``engine`` — namespace, current tick, belief count (total /
+          active-only).
+        - ``compression`` — tokens saved, compression ratio, stored
+          memories count (from :class:`CompressionEngine`).
+        - ``shared_memory`` — number of cross-namespace shares, plus
+          a registry summary.
+        - ``storage`` — graph node/edge counts.
+
+        Returns
+        -------
+        dict
+            A fresh dictionary; safe to mutate.
+        """
+        self._require_open()
+
+        ns = self._engine.namespace
+        beliefs = self._engine._scan_beliefs(ns)
+        active_count = sum(1 for b in beliefs if b.status == BeliefStatus.ACTIVE)
+
+        result: dict[str, Any] = {
+            "engine": {
+                "namespace": ns,
+                "current_tick": self._engine.current_tick,
+                "total_beliefs": len(beliefs),
+                "active_beliefs": active_count,
+            },
+            "compression": {
+                "tokens_saved": 0,
+                "compression_ratio": 0.0,
+                "stored_memories_count": 0,
+            },
+            "shared_memory": {
+                "total_shares": len(self._shared_memory_registry),
+            },
+        }
+
+        # Compression stats (best-effort).
+        if self._compression_engine is not None:
+            result["compression"] = self._compression_engine.get_stats()
+
+        # Storage counts (best-effort).
+        try:
+            result["storage"] = {
+                "graph_nodes": self._engine.graph.count_nodes(),
+                "graph_edges": self._engine.graph.count_edges(),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Graph count failed: {}", exc)
+            result["storage"] = {"graph_nodes": -1, "graph_edges": -1}
+
+        return result
+
+    # ══════════════════════════════════════════════════════════════════
     # Decay management
     # ══════════════════════════════════════════════════════════════════
 
@@ -780,6 +1446,16 @@ class NeuroMemClient:
         """``True`` if the client has been closed."""
         return self._closed
 
+    @property
+    def compression_engine(self) -> CompressionEngine | None:
+        """The compression engine, or ``None`` if not attached."""
+        return self._compression_engine
+
+    @property
+    def reversible_store(self) -> ReversibleStore | None:
+        """The reversible store, or ``None`` if not attached."""
+        return self._reversible_store
+
     # ══════════════════════════════════════════════════════════════════
     # Lifecycle
     # ══════════════════════════════════════════════════════════════════
@@ -800,6 +1476,11 @@ class NeuroMemClient:
             self._engine.vector.close()
         except Exception as exc:
             logger.warning("Error closing vector engine: {}", exc)
+        try:
+            if self._reversible_store is not None:
+                self._reversible_store.close()
+        except Exception as exc:
+            logger.warning("Error closing reversible store: {}", exc)
         self._closed = True
 
     # ══════════════════════════════════════════════════════════════════
@@ -856,5 +1537,6 @@ class NeuroMemClient:
 __all__: list[str] = [
     "NeuroMemClient",
     "RecallResult",
+    "SharedMemoryRecord",
     "EmbedFn",
 ]

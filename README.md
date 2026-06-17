@@ -20,6 +20,7 @@ NeuroMem integrates Kuzu and ChromaDB to enable agents to learn, recall, reason,
 * Negative memory for recording failed actions and dead ends
 * Reasoning trace capture for auditability and debugging
 * Trust-aware knowledge propagation between agent namespaces
+* Context compression with content-type routing, reversible storage, and per-strategy summarisation (logs, conversation, code, RAG)
 * Persistent storage powered by Kuzu and ChromaDB
 
 ## Core Concepts
@@ -87,10 +88,48 @@ with NeuroMemClient.create("./agent_memory") as client:
 
 ## Running Tests
 
+Run the full suite:
+
 ```bash
 poetry run pytest
 ```
 
- License
+Run a focused subset (e.g. the compression layer) with coverage:
+
+```bash
+poetry run pytest tests/test_router.py tests/test_reversible_memory.py tests/test_compression.py tests/test_stats.py --cov=neuromem.compression --cov-report=term-missing --cov-branch
+```
+
+The test suite is fully deterministic and offline. The compression tests use a built-in `MockLLMProvider`, so no network access or API keys are required.
+
+### Test layout
+
+| File | Covers |
+| --- | --- |
+| `tests/test_router.py` | Heuristic content-type detection (markdown tables, JSON, Python code, logs) and detection priority |
+| `tests/test_reversible_memory.py` | Lossless write/read round-trips through the structural id, SHA-256 tamper detection, and I/O fault handling |
+| `tests/test_compression.py` | Per-strategy semantic extraction (logs, conversation, code AST, RAG dedup) and the pure helper functions |
+| `tests/test_stats.py` | Exact token accounting for `tokens_before` / `tokens_after` and the global compression ratio |
+
+### Throughput benchmark
+
+A small benchmark measures tokens processed per second across the four compression strategies:
+
+```bash
+python tests/benchmark.py            # default 1000 iterations/strategy
+python tests/benchmark.py -n 200     # fewer iterations for a quick run
+```
+
+It is also importable for programmatic use:
+
+```python
+from tests.benchmark import run_benchmark
+
+results = run_benchmark(iterations=500, strategies=["code", "logs"])
+for r in results:
+    print(r.strategy, f"{r.throughput_tokens_per_sec:.0f} tok/sec")
+```
+
+## License
 
 Licensed under the MIT License. See the LICENSE file for details.

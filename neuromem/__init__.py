@@ -9,7 +9,7 @@ Top-level convenience imports.  Most users only need :class:`NeuroMemClient`::
         results = client.recall("sky colour")
 """
 
-from neuromem.client import NeuroMemClient, RecallResult
+from neuromem.client import NeuroMemClient, RecallResult, SharedMemoryRecord
 from neuromem.core.engine import EngineConfig, FusedResult, NeuroMemEngine
 from neuromem.core.exceptions import NeuroMemError
 from neuromem.core.models import (
@@ -38,6 +38,7 @@ __all__: list[str] = [
     # Client (primary entry point)
     "NeuroMemClient",
     "RecallResult",
+    "SharedMemoryRecord",
     # Engine
     "NeuroMemEngine",
     "EngineConfig",
