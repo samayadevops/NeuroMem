@@ -67,6 +67,7 @@ Desktop.ini
 neuromem_data/
 neuromem_vectors/
 neuromem_graph/
+agent_memory/
 *.db
 *.log
 

@@ -132,6 +132,20 @@ class PropagationStatus(str, Enum):
     """Delivery failed after all retries."""
 
 
+class NegativeMemoryPatternType(str, Enum):
+    """Matching strategy used by :meth:`NeuroMemEngine.is_blocked`."""
+
+    EXACT = "exact"
+    """Case-sensitive, full-string equality check (default)."""
+
+    REGEX = "regex"
+    """Regular-expression search against the candidate string."""
+
+    FUZZY = "fuzzy"
+    """Jaccard token-overlap ratio between the pattern and the candidate.
+    Blocks when the ratio meets or exceeds ``fuzzy_threshold``."""
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Base model
 # ═══════════════════════════════════════════════════════════════════════
@@ -284,7 +298,7 @@ class BeliefNode(_BaseCognitiveModel):
             return None
         if len(v) == 0:
             return None
-        return [float(x) for x in v]
+        return list(v)
 
     @field_validator("tags")
     @classmethod
@@ -555,6 +569,22 @@ class NegativeMemory(_BaseCognitiveModel):
         default=None,
         description="ID of the reasoning trace that triggered this (if any).",
     )
+    pattern_type: NegativeMemoryPatternType = Field(
+        default=NegativeMemoryPatternType.EXACT,
+        description=(
+            "Matching strategy used by is_blocked(). "
+            "One of 'exact', 'regex', or 'fuzzy'."
+        ),
+    )
+    fuzzy_threshold: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum Jaccard token-overlap ratio for fuzzy matching (0–1). "
+            "Only used when pattern_type='fuzzy'."
+        ),
+    )
 
     def record_occurrence(self) -> int:
         """Increment the occurrence counter and return the new count."""
@@ -709,7 +739,11 @@ class ReasoningStep(BaseModel):
     @field_validator("timestamp", mode="before")
     @classmethod
     def _ensure_utc_step(cls, v: datetime | None) -> datetime:
-        return _ensure_utc(v) if v is not None else _utcnow()
+        if v is None:
+            return _utcnow()
+        if v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc)
 
     @property
     def confidence_delta(self) -> float | None:
@@ -1031,6 +1065,7 @@ __all__: list[str] = [
     "BeliefStatus",
     "ContradictionResolution",
     "NegativeMemorySeverity",
+    "NegativeMemoryPatternType",
     "PropagationStatus",
     "TraceStepType",
     # Base

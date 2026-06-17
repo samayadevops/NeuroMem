@@ -45,6 +45,15 @@ neuromem = "neuromem.cli:_entrypoint"
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
+[tool.poetry.extras]
+openai               = ["openai"]
+ollama               = []
+sentence-transformers = ["sentence-transformers"]
+mcp                  = ["mcp"]
+all-providers        = ["openai", "sentence-transformers"]
+all                  = ["openai", "sentence-transformers", "mcp"]
+
+
 # ──────────────────────────────────────────────
 # Ruff (lint + format)
 # ──────────────────────────────────────────────

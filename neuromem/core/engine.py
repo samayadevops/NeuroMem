@@ -48,6 +48,7 @@ from neuromem.core.models import (
     ContradictionEvent,
     ContradictionResolution,
     NegativeMemory,
+    NegativeMemoryPatternType,
     NegativeMemorySeverity,
     PropagationRecord,
     PropagationStatus,
@@ -96,6 +97,43 @@ def _generate_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+def _matches_negative_pattern(candidate: str, neg: "NegativeMemory") -> bool:
+    """Return ``True`` if *candidate* matches the guardrail *neg*.
+
+    Three strategies are supported, controlled by ``neg.pattern_type``:
+
+    * ``exact``  — full-string equality.
+    * ``regex``  — ``re.search(neg.pattern, candidate)``.  An invalid
+                   regex never raises; it simply returns ``False``.
+    * ``fuzzy``  — Jaccard token-overlap ratio.  Blocks when the ratio
+                   meets or exceeds ``neg.fuzzy_threshold``.
+    """
+    import re as _re  # noqa: PLC0415 — lazy to avoid circular at module level
+
+    from neuromem.core.models import NegativeMemoryPatternType  # noqa: PLC0415
+
+    pt = neg.pattern_type
+    if pt == NegativeMemoryPatternType.REGEX:
+        try:
+            return bool(_re.search(neg.pattern, candidate))
+        except _re.error:
+            return False
+
+    if pt == NegativeMemoryPatternType.FUZZY:
+        a = set(candidate.lower().split())
+        b = set(neg.pattern.lower().split())
+        if not a and not b:
+            return True
+        union = a | b
+        if not union:
+            return False
+        ratio = len(a & b) / len(union)
+        return ratio >= neg.fuzzy_threshold
+
+    # Default: EXACT
+    return candidate == neg.pattern
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Engine configuration
 # ═══════════════════════════════════════════════════════════════════════
@@ -117,6 +155,7 @@ class EngineConfig:
         fusion_vector_weight: float = DEFAULT_FUSION_VECTOR_WEIGHT,
         default_gamma: float = 0.99,
         default_trust_factor: float = 0.8,
+        reinforce_on_duplicate: bool = True,
     ) -> None:
         self.contradiction_threshold: float = contradiction_threshold
         self.decay_floor: float = decay_floor
@@ -125,6 +164,7 @@ class EngineConfig:
         self.fusion_vector_weight: float = fusion_vector_weight
         self.default_gamma: float = default_gamma
         self.default_trust_factor: float = default_trust_factor
+        self.reinforce_on_duplicate: bool = reinforce_on_duplicate
 
     def validate(self) -> None:
         """Validate all config values are within legal ranges."""
@@ -270,6 +310,8 @@ class NeuroMemEngine:
                     "block_threshold": "INT64",
                     "occurrence_count": "INT64",
                     "namespace": "STRING",
+                    "pattern_type": "STRING",
+                    "fuzzy_threshold": "DOUBLE",
                 },
                 primary_key="id",
             )
@@ -402,6 +444,34 @@ class NeuroMemEngine:
             contradiction_event = self._detect_contradiction(
                 existing, claim, embedding, ns, trace,
             )
+
+        # Step 2b: Reinforce existing belief if no contradiction was found
+        if (
+            self.config.reinforce_on_duplicate
+            and existing is not None
+            and contradiction_event is None
+        ):
+            reinforce_amount = max(0.01, confidence * 0.1)
+            new_conf = existing.reinforce(amount=reinforce_amount)
+            self._persist_belief(existing, trace, is_update=True)
+            if trace is not None:
+                trace.add_step(ReasoningStep(
+                    step_type=TraceStepType.BELIEF_UPDATE,
+                    description=(
+                        f"Reinforced existing belief {existing.id} "
+                        f"(evidence_count={existing.evidence_count}, "
+                        f"confidence={new_conf:.3f})"
+                    ),
+                    belief_ids=[existing.id],
+                    confidence_after=new_conf,
+                ))
+            if owns_trace:
+                self._store_trace(trace)
+            logger.info(
+                "Reinforced belief {} (confidence={:.3f}, evidence_count={})",
+                existing.id, new_conf, existing.evidence_count,
+            )
+            return existing
 
         # Step 3: Create the new belief
         belief = BeliefNode(
@@ -689,6 +759,8 @@ class NeuroMemEngine:
         related_belief_id: str | None = None,
         namespace: str | None = None,
         trace: ReasoningTrace | None = None,
+        pattern_type: NegativeMemoryPatternType = NegativeMemoryPatternType.EXACT,
+        fuzzy_threshold: float = 0.8,
     ) -> NegativeMemory:
         """Record a negative memory guardrail.
 
@@ -726,6 +798,8 @@ class NeuroMemEngine:
             severity=severity,
             block_threshold=block_threshold,
             related_belief_id=related_belief_id,
+            pattern_type=pattern_type,
+            fuzzy_threshold=fuzzy_threshold,
         )
         self._persist_negative(neg, trace)
         trace.add_step(ReasoningStep(
@@ -738,18 +812,25 @@ class NeuroMemEngine:
             self._store_trace(trace)
 
         logger.info(
-            "Recorded negative memory {} (severity={}, block_threshold={})",
-            neg.id, severity.value, block_threshold,
+            "Recorded negative memory {} (severity={}, block_threshold={}, pattern_type={})",
+            neg.id, severity.value, block_threshold, pattern_type.value,
         )
         return neg
 
     def is_blocked(self, pattern: str, namespace: str | None = None) -> bool:
-        """Check if a pattern is blocked by a negative memory guardrail."""
+        """Check if a pattern is blocked by a negative memory guardrail.
+
+        Iterates all negative memories in the namespace and applies the
+        appropriate matching strategy (``exact``, ``regex``, or ``fuzzy``)
+        for each one.  Returns ``True`` as soon as a match is found whose
+        ``should_block`` flag is set.
+        """
         ns = namespace or self.namespace
-        neg = self._find_negative_memory(pattern, ns)
-        if neg is None:
-            return False
-        return neg.should_block
+        negatives = self._scan_negatives(ns)
+        for neg in negatives:
+            if _matches_negative_pattern(pattern, neg) and neg.should_block:
+                return True
+        return False
 
     # ── Propagation ───────────────────────────────────────────────────
 
@@ -1155,15 +1236,58 @@ class NeuroMemEngine:
             "block_threshold": neg.block_threshold,
             "occurrence_count": neg.occurrence_count,
             "namespace": neg.namespace,
+            "pattern_type": neg.pattern_type.value if hasattr(neg.pattern_type, "value") else str(neg.pattern_type),
+            "fuzzy_threshold": neg.fuzzy_threshold,
         }
         self.graph.add_node(NEGATIVE_LABEL, neg.id, props)
+
+    def _scan_negatives(self, namespace: str) -> list[NegativeMemory]:
+        """Load all NegativeMemory nodes for a namespace."""
+        results: list[NegativeMemory] = []
+        try:
+            result = self.graph.execute_query(
+                "MATCH (n:NegativeMemory) WHERE n.namespace = $ns RETURN n",
+                {"ns": namespace},
+            )
+            for record in result.records:
+                node_dict = record.get("n", record) if isinstance(record, dict) else record
+                clean = {k: v for k, v in node_dict.items() if not k.startswith("_")}
+                neg_id = clean.get("id", "")
+                if not neg_id:
+                    continue
+                try:
+                    sev_str = clean.get("severity", "warning")
+                    try:
+                        severity = NegativeMemorySeverity(sev_str)
+                    except ValueError:
+                        severity = NegativeMemorySeverity.WARNING
+                    pt_str = clean.get("pattern_type", "exact")
+                    try:
+                        pt = NegativeMemoryPatternType(pt_str)
+                    except ValueError:
+                        pt = NegativeMemoryPatternType.EXACT
+                    results.append(NegativeMemory(
+                        id=neg_id,
+                        namespace=clean.get("namespace", namespace),
+                        pattern=clean.get("pattern", ""),
+                        severity=severity,
+                        block_threshold=int(clean.get("block_threshold", 1)),
+                        occurrence_count=int(clean.get("occurrence_count", 1)),
+                        pattern_type=pt,
+                        fuzzy_threshold=float(clean.get("fuzzy_threshold", 0.8)),
+                    ))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Failed to reconstruct NegativeMemory from scan: {}", exc)
+        except NeuroMemError as exc:
+            logger.debug("Scan negatives failed for namespace {}: {}", namespace, exc)
+        return results
 
     def _find_negative_memory(
         self,
         pattern: str,
         namespace: str,
     ) -> NegativeMemory | None:
-        """Find an existing negative memory by pattern + namespace."""
+        """Find an existing negative memory by exact pattern + namespace."""
         try:
             result = self.graph.execute_query(
                 "MATCH (n:NegativeMemory {pattern: $pattern, namespace: $ns}) RETURN n",
@@ -1181,7 +1305,11 @@ class NeuroMemEngine:
                         severity = NegativeMemorySeverity(sev_str)
                     except ValueError:
                         severity = NegativeMemorySeverity.WARNING
-
+                    pt_str = clean.get("pattern_type", "exact")
+                    try:
+                        pt = NegativeMemoryPatternType(pt_str)
+                    except ValueError:
+                        pt = NegativeMemoryPatternType.EXACT
                     return NegativeMemory(
                         id=neg_id,
                         namespace=clean.get("namespace", namespace),
@@ -1189,6 +1317,8 @@ class NeuroMemEngine:
                         severity=severity,
                         block_threshold=int(clean.get("block_threshold", 1)),
                         occurrence_count=int(clean.get("occurrence_count", 1)),
+                        pattern_type=pt,
+                        fuzzy_threshold=float(clean.get("fuzzy_threshold", 0.8)),
                     )
                 except Exception as exc:
                     logger.debug("Failed to reconstruct NegativeMemory: {}", exc)

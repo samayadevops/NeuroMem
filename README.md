@@ -15,12 +15,15 @@ NeuroMem integrates Kuzu and ChromaDB to enable agents to learn, recall, reason,
 ## Features
 
 * Hybrid memory retrieval using graph relationships and vector similarity
-* Confidence-based beliefs with logical-time decay
+* Confidence-based beliefs with logical-time decay and **automatic belief reinforcement** on duplicate observations
 * Automatic contradiction detection and resolution
-* Negative memory for recording failed actions and dead ends
+* Negative memory for recording failed actions and dead ends (now with **Regex and Fuzzy** pattern matching)
 * Reasoning trace capture for auditability and debugging
 * Trust-aware knowledge propagation between agent namespaces
-* **Token Usage Reducer (Context Compression)** with content-type routing, reversible storage, and domain-specific summarisation (logs, conversation, code, RAG)
+* **Built-in Embedding Providers**: Out-of-the-box support for OpenAI, local Ollama, and offline Sentence-Transformers
+* **Async-Native Client**: Thread-safe `asyncio` wrapper for seamless FastAPI and LangGraph integration
+* **MCP Server**: Built-in Model Context Protocol server (`neuromem serve`) for drop-in integration with Cursor, Claude Code, and Continue
+* **Token Usage Reducer (Context Compression)** with content-type routing, reversible storage, and domain-specific summarisation
 * **Full CLI** for integration with shells, Claude Code, Gemini CLI, and any subprocess-capable agent
 * Persistent storage powered by Kuzu and ChromaDB
 
@@ -120,6 +123,23 @@ with NeuroMemClient.create("./agent_memory") as client:
         "tool_run_failed: api_timeout",
         block_threshold=2
     )
+
+### Async API
+
+For async applications (FastAPI, LangGraph), use the native wrapper which safely serialises writes to the graph database:
+
+```python
+import asyncio
+from neuromem import AsyncNeuroMemClient
+
+async def main():
+    async with await AsyncNeuroMemClient.create("./agent_memory") as client:
+        belief = await client.learn("The sky is blue", confidence=0.9)
+        results = await client.recall("sky colour")
+        print(results[0].claim)
+
+asyncio.run(main())
+```
 ```
 
 ### CLI
@@ -163,6 +183,9 @@ neuromem propagate <belief_id> agent_b --trust-factor 0.8
 
 # Deprecate a belief
 neuromem forget <belief_id>
+
+# Start the MCP Server (Model Context Protocol)
+neuromem serve
 ```
 
 **Global flags** (available on all commands):
@@ -171,6 +194,8 @@ neuromem forget <belief_id>
 |---|---|
 | `--data-dir PATH` | Storage directory (default: `./neuromem_data`) |
 | `--namespace NS` | Agent namespace (default: `default`) |
+| `--embed-provider` | Provider name: `openai`, `ollama`, or `sentence-transformers` |
+| `--embed-model` | Model string to use for the specified provider |
 | `--pretty` | Pretty-print JSON output |
 | `--quiet` | Suppress loguru diagnostic output on stderr |
 | `--format {json,text}` | Output format (default: `json`) |

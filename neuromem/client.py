@@ -703,6 +703,8 @@ class NeuroMemClient:
         context: dict[str, Any] | None = None,
         related_belief_id: str | None = None,
         namespace: str | None = None,
+        pattern_type: str = "exact",
+        fuzzy_threshold: float = 0.8,
     ) -> NegativeMemory:
         """Record a negative-memory guardrail to prevent repeating failures.
 
@@ -720,6 +722,12 @@ class NeuroMemClient:
             ID of an associated belief (if any).
         namespace:
             Target namespace.
+        pattern_type:
+            Matching strategy when ``is_blocked()`` is called.  One of
+            ``"exact"`` (default), ``"regex"``, or ``"fuzzy"``.
+        fuzzy_threshold:
+            Minimum Jaccard token-overlap ratio for ``fuzzy`` matching
+            (0.0–1.0, default 0.8).
 
         Returns
         -------
@@ -735,6 +743,12 @@ class NeuroMemClient:
             except ValueError:
                 severity = NegativeMemorySeverity.WARNING
 
+        from neuromem.core.models import NegativeMemoryPatternType  # noqa: PLC0415
+        try:
+            pt = NegativeMemoryPatternType(pattern_type)
+        except ValueError:
+            pt = NegativeMemoryPatternType.EXACT
+
         return self._engine.record_negative(
             pattern=pattern,
             context=context,
@@ -742,6 +756,8 @@ class NeuroMemClient:
             block_threshold=block_threshold,
             related_belief_id=related_belief_id,
             namespace=namespace,
+            pattern_type=pt,
+            fuzzy_threshold=fuzzy_threshold,
         )
 
     def is_blocked(
@@ -1524,7 +1540,7 @@ class NeuroMemClient:
             if not isinstance(embedding, list) or not embedding:
                 logger.warning("Embedding function returned invalid result for text")
                 return None
-            return [float(x) for x in embedding]
+            return list(embedding)
         except Exception as exc:
             logger.warning("Embedding function failed (non-fatal): {}", exc)
             return None

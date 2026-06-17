@@ -81,10 +81,30 @@ def _err(message: str, *, pretty: bool, fmt: str) -> int:
 # Client factory
 # ─────────────────────────────────────────────────────────────────────
 
-def _make_client(data_dir: str, namespace: str) -> Any:
+def _make_client(data_dir: str, namespace: str, args: "argparse.Namespace | None" = None) -> Any:
     """Import and create a :class:`NeuroMemClient` (deferred import)."""
     from neuromem.client import NeuroMemClient  # noqa: PLC0415
-    return NeuroMemClient.create(data_dir, namespace=namespace)
+
+    embed_fn = None
+    if args is not None:
+        provider = getattr(args, "embed_provider", None)
+        model = getattr(args, "embed_model", None)
+        base_url = getattr(args, "embed_base_url", None)
+
+        if provider == "openai":
+            from neuromem.providers.openai import OpenAIEmbedProvider  # noqa: PLC0415
+            embed_fn = OpenAIEmbedProvider(model=model or "text-embedding-3-small")
+        elif provider == "ollama":
+            from neuromem.providers.ollama import OllamaEmbedProvider  # noqa: PLC0415
+            embed_fn = OllamaEmbedProvider(
+                model=model or "nomic-embed-text",
+                base_url=base_url or "http://localhost:11434",
+            )
+        elif provider == "sentence-transformers":
+            from neuromem.providers.sentence_transformers import SentenceTransformerEmbedProvider  # noqa: PLC0415
+            embed_fn = SentenceTransformerEmbedProvider(model=model or "all-MiniLM-L6-v2")
+
+    return NeuroMemClient.create(data_dir, namespace=namespace, embed_fn=embed_fn)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -93,7 +113,7 @@ def _make_client(data_dir: str, namespace: str) -> Any:
 
 def _cmd_learn(args: argparse.Namespace) -> dict[str, Any]:
     tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
-    with _make_client(args.data_dir, args.namespace) as client:
+    with _make_client(args.data_dir, args.namespace, args) as client:
         belief = client.learn(
             args.claim,
             confidence=args.confidence,
@@ -114,7 +134,7 @@ def _cmd_learn(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _cmd_recall(args: argparse.Namespace) -> dict[str, Any]:
-    with _make_client(args.data_dir, args.namespace) as client:
+    with _make_client(args.data_dir, args.namespace, args) as client:
         results = client.recall(
             query=args.query,
             n_results=args.n,
@@ -151,10 +171,13 @@ def _cmd_guard(args: argparse.Namespace) -> dict[str, Any]:
             context=context,
             related_belief_id=args.related_belief_id,
             namespace=args.namespace,
+            pattern_type=args.pattern_type,
+            fuzzy_threshold=args.fuzzy_threshold,
         )
         return {
             "id": neg.id,
             "pattern": neg.pattern,
+            "pattern_type": neg.pattern_type.value if hasattr(neg.pattern_type, "value") else str(neg.pattern_type),
             "severity": neg.severity.value if hasattr(neg.severity, "value") else str(neg.severity),
             "occurrence_count": neg.occurrence_count,
             "block_threshold": neg.block_threshold,
@@ -285,6 +308,13 @@ def _cmd_retrieve(args: argparse.Namespace) -> dict[str, Any]:
         return {"memory_id": args.memory_id, "original": original}
 
 
+def _cmd_serve(args: argparse.Namespace) -> None:  # type: ignore[return]
+    """Start the MCP server over stdio transport (blocking)."""
+    import asyncio  # noqa: PLC0415
+    from neuromem.mcp_server import run_server  # noqa: PLC0415
+    asyncio.run(run_server(args.data_dir, args.namespace))
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Argument parser construction
 # ─────────────────────────────────────────────────────────────────────
@@ -334,6 +364,32 @@ def _build_parser() -> argparse.ArgumentParser:
         "--version",
         action="version",
         version="%(prog)s 0.1.0",
+    )
+    parser.add_argument(
+        "--embed-provider",
+        choices=["openai", "ollama", "sentence-transformers"],
+        default=None,
+        dest="embed_provider",
+        metavar="PROVIDER",
+        help=(
+            "Built-in embedding provider to use for semantic search. "
+            "Choices: openai, ollama, sentence-transformers. "
+            "Requires the corresponding optional dependency."
+        ),
+    )
+    parser.add_argument(
+        "--embed-model",
+        default=None,
+        dest="embed_model",
+        metavar="MODEL",
+        help="Embedding model name (provider-specific, e.g. text-embedding-3-small)",
+    )
+    parser.add_argument(
+        "--embed-base-url",
+        default=None,
+        dest="embed_base_url",
+        metavar="URL",
+        help="Base URL for the embedding provider server (Ollama / proxy)",
     )
 
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
@@ -424,6 +480,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--related-belief-id", default=None,
         metavar="ID",
         help="ID of a related belief (optional)",
+    )
+    p_guard.add_argument(
+        "--pattern-type",
+        choices=["exact", "regex", "fuzzy"],
+        default="exact",
+        dest="pattern_type",
+        help=(
+            "Matching strategy when is-blocked is called: "
+            "exact (default), regex, or fuzzy (Jaccard token overlap)."
+        ),
+    )
+    p_guard.add_argument(
+        "--fuzzy-threshold",
+        type=float,
+        default=0.8,
+        dest="fuzzy_threshold",
+        metavar="[0-1]",
+        help="Minimum token-overlap ratio for fuzzy matching (default: 0.8)",
     )
 
     # ── is-blocked ────────────────────────────────────────────────────
@@ -524,6 +598,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_retrieve.add_argument("memory_id", help="Snapshot ID (raw_reference) to look up")
 
+    # ── serve ─────────────────────────────────────────────────────────
+    sub.add_parser(
+        "serve",
+        help="Start an MCP server exposing NeuroMem tools over stdio",
+        description=(
+            "Launch a Model Context Protocol (MCP) server that exposes all "
+            "NeuroMem operations as typed tools to any MCP-compatible agent "
+            "(Claude Code, Cursor, Continue, etc.).\n\n"
+            "The server communicates over stdio (standard MCP transport).\n"
+            "Add to claude_desktop_config.json:\n"
+            '  {\"mcpServers\": {\"neuromem\": {\"command\": \"neuromem\", \"args\": [\"serve\"]}}}'
+        ),
+    )
+
     return parser
 
 
@@ -544,6 +632,7 @@ _DISPATCH: dict[str, Any] = {
     "decay":      _cmd_decay,
     "compress":   _cmd_compress,
     "retrieve":   _cmd_retrieve,
+    "serve":      _cmd_serve,
 }
 
 

@@ -10,6 +10,7 @@ Top-level convenience imports.  Most users only need :class:`NeuroMemClient`::
 """
 
 from neuromem.client import NeuroMemClient, RecallResult, SharedMemoryRecord
+from neuromem.async_client import AsyncNeuroMemClient
 from neuromem.core.engine import EngineConfig, FusedResult, NeuroMemEngine
 from neuromem.core.exceptions import NeuroMemError
 from neuromem.core.models import (
@@ -18,6 +19,7 @@ from neuromem.core.models import (
     ContradictionEvent,
     ContradictionResolution,
     NegativeMemory,
+    NegativeMemoryPatternType,
     NegativeMemorySeverity,
     PropagationRecord,
     PropagationStatus,
@@ -29,6 +31,7 @@ from neuromem.storage.base import (
     BaseGraphEngine,
     BaseVectorEngine,
 )
+from neuromem import providers
 
 
 __version__ = "0.1.0"
@@ -38,6 +41,7 @@ __all__: list[str] = [
     "__version__",
     # Client (primary entry point)
     "NeuroMemClient",
+    "AsyncNeuroMemClient",
     "RecallResult",
     "SharedMemoryRecord",
     # Engine
@@ -50,6 +54,7 @@ __all__: list[str] = [
     "ContradictionEvent",
     "ContradictionResolution",
     "NegativeMemory",
+    "NegativeMemoryPatternType",
     "NegativeMemorySeverity",
     "PropagationRecord",
     "PropagationStatus",
@@ -61,4 +66,6 @@ __all__: list[str] = [
     "BaseVectorEngine",
     # Exceptions
     "NeuroMemError",
+    # Providers
+    "providers",
 ]
