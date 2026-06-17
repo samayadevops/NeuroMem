@@ -20,7 +20,7 @@ NeuroMem integrates Kuzu and ChromaDB to enable agents to learn, recall, reason,
 * Negative memory for recording failed actions and dead ends
 * Reasoning trace capture for auditability and debugging
 * Trust-aware knowledge propagation between agent namespaces
-* Context compression with content-type routing, reversible storage, and per-strategy summarisation (logs, conversation, code, RAG)
+* **Token Usage Reducer (Context Compression)** with content-type routing, reversible storage, and domain-specific summarisation (logs, conversation, code, RAG)
 * **Full CLI** for integration with shells, Claude Code, Gemini CLI, and any subprocess-capable agent
 * Persistent storage powered by Kuzu and ChromaDB
 
@@ -45,6 +45,23 @@ Step-by-step records of retrieval, inference, contradiction handling, and decay 
 ### PropagationRecords
 
 Track how knowledge is shared across namespaces while preserving trust scores and decay state.
+
+### Token Usage Reducer (Context Compression)
+
+A context optimization pipeline designed to compress raw logs, conversation history, source code, and RAG retrieval chunks to fit within LLM context windows while preserving crucial details.
+
+### CompressionEngine
+
+The central orchestrator that manages context routing, compression, and reversible archiving. It tracks real-time statistics like `tokens_saved`, `compression_ratio`, and `stored_memories_count`.
+
+### ReversibleStore
+
+A lossless archiving layer that stores the original uncompressed text on disk and allows it to be retrieved later using a unique snapshot ID.
+
+### ContentRouter
+
+A classification component that automatically routes raw text to the appropriate summarization strategy (e.g. parsing Python AST, extracting logs severity, or merging conversational turns).
+
 
 ## Installation
 

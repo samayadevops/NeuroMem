@@ -1,4 +1,14 @@
+# Core Dependencies
 pydantic>=2.7,<3.0
 kuzu>=0.7.0,<0.8.0
 chromadb>=1.0.0,<2.0
 loguru>=0.7.0,<0.8.0
+
+# Development Dependencies
+pytest>=8.0
+pytest-cov>=5.0
+pytest-timeout>=2.3
+pytest-asyncio>=0.23
+mypy>=1.10
+ruff>=0.5
+basedpyright>=1.18
